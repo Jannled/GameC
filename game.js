@@ -13,6 +13,7 @@ var renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, canvas: c
 //Controls
 var controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+controls.enablePan = false;
 controls.minDistance = 10;
 controls.maxDistance = 100;
 controls.target.set(0, 0, 0.2);
@@ -32,7 +33,7 @@ var gamefield = [];
 
 //Field Geometry/Materials
 var fieldBorderGeometry = new THREE.CircleGeometry(0.45, 32);
-var fieldBorderMaterial = new THREE.MeshBasicMaterial({color: 0x000000});
+var fieldBorderMaterial = new THREE.MeshBasicMaterial({color: 0x000000, side: THREE.DoubleSide});
 
 var fieldGeometry = new THREE.CircleGeometry(0.4, 32);
 var fieldMaterial = new THREE.MeshBasicMaterial({color: 0xFFEBCD});
@@ -43,11 +44,18 @@ var gamerules = {
 	shortSide: 3,
 	numPlayers: 4,			//Currently hardcoded to 4!
 	numPuppets: 4,			//Amount of puppets each player has
-	jumpInHouse: false,
-	clearExit: false,
-	sixForceExit: false,
+	jumpInHouse: true,
+	clearExit: true,
+	sixForceExit: true,
 	crossJunction: false,
 	backwardsAttack: false
+};
+
+var gameState = {
+	currentPlayer: 0,
+	dice: 0,
+	tries: 0,			//How often the player can roll the dice before the next player's turn
+	extraTurns: false	//No puppets are on gamefield, grand 3 rolls
 };
 
 //Dice
@@ -69,7 +77,9 @@ var defaultPlayerMaterial = [
 	new THREE.MeshMatcapMaterial({ color: 0x5555ff, matcap: porcelainMatcap }), //Player 3
 	new THREE.MeshMatcapMaterial({ color: 0xfff055, matcap: porcelainMatcap })  //Player 4
 ];
-var DefaultPlayerGeometry = new THREE.ConeGeometry(0.35, 1, 8);
+var defaultPlayerGeometry = new THREE.ConeGeometry(0.35, 1, 8);
+defaultPlayerGeometry.rotateX(Math.PI/2);
+defaultPlayerGeometry.translate(0, 0, 0.5);
 var players = [];
 
 class Player
@@ -83,43 +93,37 @@ class Player
 		this.finishIndex = finishIndex;	//Index of house entry
 		this.material = material;		//Player material
 	}
+
+	addPuppet()
+	{
+		this.puppets[this.puppets.length] = new Puppet(this);
+	}
 }
 
 class Puppet
 {
-	constructor(puppetMesh, index, owningPlayer)
+	constructor(owningPlayer)
 	{
-		this.index = index;
-		this.puppetMesh = puppetMesh;
 		this.player = owningPlayer;
+		this.distanceTraveled = 0;
+		this.fieldLen = owningPlayer.startIndex + owningPlayer.finishIndex;
+		this.puppetMesh = new THREE.Mesh(defaultPlayerGeometry, owningPlayer.material);
+		scene.add(this.puppetMesh);
 
-		this.jump();
+		this.move(0);
 	}
 
 	move(amount)
 	{
-		this.index += amount;
-		if(index <= this.player.finishIndex)
-			this.puppetMesh.position.copy(gamefield[this.index]);
-		else
-			console.log("Player " + this.player.name + " has reached the goal!");
-	}
+		this.distanceTraveled += amount;
+		var posOnField = mod(this.distanceTraveled + this.player.startIndex, gamefield.length);
 
-	jump(index)
-	{
-		if(index)
-			this.index = index;
-		else
-			this.index = this.player.startIndex;
-
-		if(index <= finishIndex)
-			this.puppetMesh.position.copy(gamefield[index]);
+		if(this.distanceTraveled <= this.fieldLen)
+			this.puppetMesh.position.copy(gamefield[posOnField]);
 		else
 			console.log("Player " + this.player.name + " has reached the goal!");
 	}
 }
-
-init();
 
 function init()
 {
@@ -153,24 +157,12 @@ function init()
 		'models/DefaultPlayer.obj',
 		// called when resource is loaded
 		function ( object ) 
-		{/*
-			for(var i=0; i<4; i++)
-			{
-				var player = object.children[0].clone(); 
-				player.material = defaultPlayerMaterial[i];
-				player.rotateX(Math.PI/2);
-				player.position.copy(gamefield[i]);
-				player.scale.x = 0.2;
-				player.scale.y = 0.2;
-				player.scale.z = 0.2;
-				players[players.length] = player;
-				scene.add(player);
-			}*/
-			var player = new THREE.Mesh(DefaultPlayerGeometry, defaultPlayerMaterial[0]);
-			player.rotateX(Math.PI/2);
-			player.position.z = 0.5;
-			scene.add(player);
+		{
+			defaultPlayerGeometry = object.children[0].geometry;
+			defaultPlayerGeometry.scale(0.2, 0.2, 0.2);
+			defaultPlayerGeometry.rotateX(Math.PI/2);
 
+			//scene.add(new THREE.Mesh(defaultPlayerGeometry, defaultPlayerMaterial[0]));
 		},
 
 		// called when loading is in progresses
@@ -185,7 +177,6 @@ function init()
 			console.log( 'An error happened' );
 		}
 	);
-
 }
 
 function generateGamefield(longSide = 5, shortSide = 3)
@@ -292,7 +283,46 @@ function generateGamefield(longSide = 5, shortSide = 3)
 
 function gameloop()
 {
+	var currentPlayer = players[gameState.currentPlayer];
 
+	if(gameState.tries < 1)
+	{
+		//Next players turn
+		gameState.currentPlayer = (gameState.currentPlayer + 1) % gamerules.numPlayers;
+		gameState.tries = 1;
+		gameState.dice = 0;
+		gameState.extraTurns = false;
+		sendMessage(currentPlayer.name + " ist am Zug");
+		console.log("Turn: " + currentPlayer.name);
+	}
+
+	//If player has no puppets on gamefield, grant extra turns
+	if(currentPlayer.puppets.length < 1 && !gameState.extraTurns)
+	{
+		gameState.extraTurns = true;
+		gameState.tries = 3;
+	}
+
+	//Player used the dice
+	if(gameState.dice > 0)
+	{
+		gameState.tries -= 1;
+
+		//Player rolled a six
+		if(gameState.dice == 6)
+		{
+			if(gamerules.sixForceExit)
+				currentPlayer.addPuppet();
+			gameState.tries = 1;
+		}
+			
+		//Clear dice
+		gameState.dice = 0;
+	}
+	else
+	{
+
+	}
 }
 
 var warscheinlich = [0, 0, 0, 0, 0, 0];
@@ -300,7 +330,8 @@ var warscheinlich = [0, 0, 0, 0, 0, 0];
 function rollDice()
 {
 	var res = Math.floor(Math.random() * 6 / (1 - 0) + 1);
-	warscheinlich[res-1] = warscheinlich[res-1] + 1;
+	warscheinlich[res-1] += 1;
+	gameState.dice = res;
 	if(dice)
 		dice.setRotationFromEuler(diceRot[res-1]);
 	return res;
@@ -325,6 +356,7 @@ var render = function ()
 	if(!dice)
 		return;
 
+	gameloop();
 	renderer.render(scene, camera);
 };
 
@@ -341,7 +373,16 @@ function onMouseClick(event)
 {
 	raycaster.setFromCamera(mouse, camera);
 	if(raycaster.intersectObject(dice).length > 0)
-		console.log("Dice: " + rollDice());
+	{
+		var res = rollDice();
+		console.log("Dice: " + res + "(" + warscheinlich + ")");
+	}
+
+	players[gameState.currentPlayer].puppets.forEach(p => 
+	{
+		if(raycaster.intersectObject(p.puppetMesh).length > 0)
+			console.log("Player clicked own puppet!");
+	});
 }
 canvas.addEventListener('click', onMouseClick);
 
@@ -349,4 +390,22 @@ function mod(n, m) {
 	return ((n % m) + m) % m;
 }
 
+function sendMessage(text, channel = 0)
+{
+	var message = document.createElement("div");
+	message.innerHTML = text;
+	message.classList.add("bubble");
+
+	switch(channel)
+	{
+		case 1: message.classList.add("me"); break;
+		case 1: message.classList.add("you"); break;
+		default: message.classList.add("me"); break;
+	}
+
+	document.getElementById("chat").appendChild(message);
+	message.scrollIntoView({block: "start", behavior: "smooth"});
+}
+
+init();
 render();
